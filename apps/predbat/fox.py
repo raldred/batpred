@@ -210,7 +210,8 @@ class FoxAPI(ComponentBase):
         self.available_variables = {}
         self.device_values = {}
         self.device_settings = {}
-        self.device_production = {}
+        self.device_production_month = {}
+        self.device_production_year = {}
         self.device_battery_charging_time = {}
         self.device_scheduler = {}
         self.device_current_schedule = {}
@@ -303,6 +304,7 @@ class FoxAPI(ComponentBase):
                     await self.get_schedule_settings_ha(sn)
                     await self.get_scheduler(sn)
                     await self.compute_schedule(sn)
+                    await self.get_device_production_month(sn)
 
         # Real time data every 5 minutes
         if first or (seconds % (5 * 60) == 0):
@@ -730,7 +732,7 @@ class FoxAPI(ComponentBase):
             self.local_schedule[deviceSN]["discharge"]["enable"] = 1 if discharge_group.get("enable", 0) else 0
         return self.local_schedule
 
-    async def get_device_production(self, deviceSN):
+    async def get_device_production_year(self, deviceSN):
         """
         [
             {'unit': 'kWh', 'values': [0.0, 0.0, 0.0, 0.0, 151.5999999999999, 1079.1000000000004, 979.8999999999996, 871.3999999999987, 0.0, 0.0, 0.0, 0.0], 'variable': 'generation'},
@@ -745,7 +747,26 @@ class FoxAPI(ComponentBase):
         variables = ["generation", "feedin", "gridConsumption", "chargeEnergyToTal", "dischargeEnergyToTal"]
         result = await self.request_get(GET_DEVICE_PRODUCTION, datain={"sn": deviceSN, "year": year, "dimension": "year", "variables": variables}, post=True)
         if result is not None:
-            self.device_production[deviceSN] = result
+            self.device_production_year[deviceSN] = result
+
+    async def get_device_production_month(self, deviceSN):
+        """
+        [
+            {"unit":"kWh","values":[0.0,0.0,0.0,0.0,0.0,0.1000000000003638,0.3999999999996362,0.5,0.3999999999996362,0.3999999999996362,0.3000000000010914,1.1000000000003638,1.5,1.2999999999992724,0.7000000000007276,0.5,0.4000000000014552,0.5,2.600000000000364,0.5,0.7999999999992724,0.7000000000007276,0.5,0.0],"variable":"generation"},
+            {"unit":"kWh","values":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.8999999999996362,1.199999999999818,0.6999999999998181,0.3000000000001819,0.0,0.0,0.0,1.800000000000182,0.0,0.0,0.0,0.0,0.0],"variable":"feedin"},
+            {"unit":"kWh","values":[11.399999999999636,1.3000000000010914,5.100000000000364,6.800000000001091,6.799999999999272,1.6000000000003638,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.09999999999854481,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.2000000000007276],"variable":"gridConsumption"},
+            {"unit":"kWh","values":[4.800000000000182,0.8999999999996362,0.0,0.1000000000003638,0.0,0.0,0.0,0.0,0.0,0.1999999999998181,1.0,0.5,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"variable":"chargeEnergyToTal"},
+            {"unit":"kWh","values":[0.0,0.0,0.0,0.0,0.0,0.1999999999998181,0.3999999999996362,0.6000000000003638,0.3999999999996362,0.2000000000007276,0.0,0.0,0.0,0.0999999999994543,0.0,0.3000000000001819,0.5,0.5,2.699999999999818,0.5,0.7999999999992724,0.8000000000001819,0.5,0.1000000000003638],"variable":"dischargeEnergyToTal"},
+            {"unit":"kWh","values":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.3999999999996362,1.3999999999996362,1.6999999999989086,1.6000000000003638,1.2999999999992724,0.7999999999992724,0.2000000000007276,0.1000000000003638,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"variable":"PVEnergyTotal"}
+        ]
+        """
+        GET_DEVICE_PRODUCTION = "/op/v0/device/report/query"
+        year = datetime.now(self.local_tz).year
+        month = datetime.now(self.local_tz).month
+        variables = ["generation", "feedin", "gridConsumption", "chargeEnergyToTal", "dischargeEnergyToTal", "PVEnergyTotal"]
+        result = await self.request_get(GET_DEVICE_PRODUCTION, datain={"sn": deviceSN, "year": year, "month": month, "dimension": "month", "variables": variables}, post=True)
+        if result is not None:
+            self.device_production_month[deviceSN] = result
 
     async def get_device_power_generation(self, deviceSN):
         """
@@ -1268,6 +1289,47 @@ class FoxAPI(ComponentBase):
                     entity_id = entity_name_sensor + "_" + sn.lower() + "_" + "setting_" + setting.lower()
                 self.dashboard_item(entity_id, state=state, attributes=attributes, app="fox")
 
+        # Publish month and today totals
+        for sn in self.device_production_month:
+            today = datetime.now(self.local_tz).day
+
+            for item in self.device_production_month[sn]:
+                units = item.get("unit", "")
+                variable = item.get("variable", "")
+                values = item.get("values", [])
+
+                # Month Total Sensor
+                item_name = variable + " (Month)"
+                entity_id = entity_name_sensor + "_" + sn.lower() + "_" + variable.lower() + "_month"
+                state = sum(values)
+                attributes = {
+                    "unit_of_measurement": units,
+                    "friendly_name": f"Fox {sn} {item_name}",
+                    "values": values
+                }
+                if units in ["kWh", "Wh"]:
+                    attributes["device_class"] = "energy"
+                if variable.lower() in ["generation", "feedin", "gridconsumption", "chargeenergytotal", "dischargeenergytotal", "pvenergytotal"]:
+                    attributes["state_class"] = "total"
+
+                self.dashboard_item(entity_id, state=state, attributes=attributes, app="fox")
+
+                # Today Total Sensor
+                item_name = variable + " (Today)"
+                entity_id = entity_name_sensor + "_" + sn.lower() + "_" + variable.lower() + "_today"
+                state = values[today - 1] if len(values) >= today else 0
+                
+                attributes = {
+                    "unit_of_measurement": units,
+                    "friendly_name": f"Fox {sn} {item_name}",
+                }
+                if units in ["kWh", "Wh"]:
+                    attributes["device_class"] = "energy"
+                if variable.lower() in ["generation", "feedin", "gridconsumption", "chargeenergytotal", "dischargeenergytotal", "pvenergytotal"]:
+                    attributes["state_class"] = "total"
+
+                self.dashboard_item(entity_id, state=state, attributes=attributes, app="fox")
+
     async def write_setting_from_event(self, entity_id, value, is_number=False):
         """
         Handle write events
@@ -1534,7 +1596,7 @@ class FoxAPI(ComponentBase):
         self.set_arg("load_today", [f"sensor.{self.prefix}_fox_{device}_loads" for device in batteries])
         self.set_arg("import_today", [f"sensor.{self.prefix}_fox_{device}_gridconsumption" for device in batteries])
         self.set_arg("export_today", [f"sensor.{self.prefix}_fox_{device}_feedin" for device in batteries])
-        self.set_arg("pv_today", [f"sensor.{self.prefix}_fox_{device}_pvenergytotal" for device in pvs])
+        self.set_arg("pv_today", [f"sensor.{self.prefix}_fox_{device}_pvenergytotal_total_today" for device in pvs])
         self.set_arg("battery_rate_max", [f"sensor.{self.prefix}_fox_{device}_battery_rate_max" for device in batteries])
         self.set_arg("battery_power", [f"sensor.{self.prefix}_fox_{device}_invbatpower" for device in batteries])
         self.set_arg("grid_power", [f"sensor.{self.prefix}_fox_{device}_meterpower" for device in batteries])
