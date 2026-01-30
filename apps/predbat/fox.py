@@ -28,7 +28,7 @@ FOX_LANG = "en"
 TIMEOUT = 60
 FOX_RETRIES = 10
 FOX_SETTINGS = ["ExportLimit", "MaxSoc", "GridCode", "WorkMode", "ExportLimitPower", "MinSoc", "MinSocOnGrid"]
-OPTIONS_WORK_MODE = ["SelfUse", "ForceCharge", "ForceDischarge", "Feedin"]
+OPTIONS_WORK_MODE = ["SelfUse", "ForceCharge", "ForceDischarge", "Feedin", "Backup"]
 
 # Dummy attribute table for testing
 fox_attribute_table = {"mode": {}}
@@ -990,7 +990,7 @@ class FoxAPI(ComponentBase):
                     'endminute': {'unit': '', 'precision': 1.0, 'range': {'min': 0.0, 'max': 59.0}},
                     'fdsoc': {'unit': '%', 'precision': 1.0, 'range': {'min': 10.0, 'max': 100.0}},
                     'starthour': {'unit': '', 'precision': 1.0, 'range': {'min': 0.0, 'max': 23.0}},
-                    'workmode': {'enumList': ['ForceDischarge', 'Feedin', 'SelfUse', 'ForceCharge'], 'unit': '', 'precision': 1.0},
+                    'workmode': {'enumList': ['ForceDischarge', 'Feedin', 'Backup', 'SelfUse', 'ForceCharge'], 'unit': '', 'precision': 1.0},
                     'minsocongrid': {'unit': '%', 'precision': 1.0, 'range': {'min': 10.0, 'max': 100.0}},
                     'maxsoc': {'unit': '%', 'precision': 1.0, 'range': {'min': 10.0, 'max': 100.0}}
                 }
