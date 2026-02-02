@@ -218,6 +218,7 @@ class FoxAPI(ComponentBase):
         self.local_schedule = {}
         self.fdpwr_max = {}
         self.fdsoc_min = {}
+        self.available_work_modes = {}
         # Rate limiting tracking
         self.requests_today = 0
         self.rate_limit_errors_today = 0
@@ -704,7 +705,7 @@ class FoxAPI(ComponentBase):
         groups = battery_slots
         # Charge slot 0 if enabled
         for group in groups[:]:
-            if group.get("enable", 0) and (group.get("workMode", "") in ["ForceCharge"]):
+            if group.get("enable", 0) and (group.get("workMode", "") in ["ForceCharge", "Backup"]):
                 charge_group = group
                 break
         # For force discharge enabled
@@ -1014,7 +1015,11 @@ class FoxAPI(ComponentBase):
 
             # Min SOC On grid can change as Predbat writes reserve so this must be the real min
             self.fdsoc_min[deviceSN] = result.get("properties", {}).get("fdsoc", {}).get("range", {}).get("min", 10)
-            self.log("Fox: Fetched schedule got {} fdPwr max {} fdSoc min {}".format(result, self.fdpwr_max[deviceSN], self.fdsoc_min[deviceSN]))
+            
+            # Extract available work modes from scheduler properties
+            self.available_work_modes[deviceSN] = result.get("properties", {}).get("workmode", {}).get("enumList", [])
+            
+            self.log("Fox: Fetched schedule got {} fdPwr max {} fdSoc min {} work modes {}".format(result, self.fdpwr_max[deviceSN], self.fdsoc_min[deviceSN], self.available_work_modes[deviceSN]))
             self.device_scheduler[deviceSN] = result
             return result
         return {}
@@ -1536,6 +1541,33 @@ class FoxAPI(ComponentBase):
 
         await self.publish_schedule_settings_ha(serial)
 
+    def select_charge_work_mode(self, serial):
+        """
+        Select appropriate work mode for charge window based on solar generation.
+        Returns "Backup" if solar is generating and mode is available, otherwise "ForceCharge".
+        """
+        # Get current PV power
+        pvpower = self.device_values.get(serial, {}).get("pvPower", {}).get("value", 0)
+        try:
+            pvpower = float(pvpower) if pvpower is not None else 0.0
+        except (ValueError, TypeError):
+            pvpower = 0.0
+        
+        # Check if Backup mode is available
+        available_modes = self.available_work_modes.get(serial, [])
+        has_backup = "Backup" in available_modes
+        
+        # Select mode: Backup if generating (>= 0.1 kW) and available, otherwise ForceCharge
+        if pvpower >= 0.1 and has_backup:
+            mode = "Backup"
+            self.log("Fox: Charge mode for {}: {} (pvPower={:.2f}kW, Backup available=True)".format(serial, mode, pvpower))
+        else:
+            mode = "ForceCharge"
+            reason = "pvPower={:.2f}kW".format(pvpower) if pvpower < 0.1 else "Backup unavailable"
+            self.log("Fox: Charge mode for {}: {} ({})".format(serial, mode, reason))
+        
+        return mode
+
     async def apply_battery_schedule(self, serial):
         new_schedule = []
         fdPwr_max = self.fdpwr_max.get(serial, 8000)
@@ -1562,7 +1594,7 @@ class FoxAPI(ComponentBase):
                             "startMinute": start_minute,
                             "endHour": end_hour,
                             "endMinute": end_minute,
-                            "workMode": "ForceCharge",
+                            "workMode": self.select_charge_work_mode(serial),
                             "fdSoc": 100,
                             "maxSoc": soc,
                             "fdPwr": fdPwr_max,
