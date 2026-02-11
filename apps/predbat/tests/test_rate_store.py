@@ -17,7 +17,7 @@ from rate_store import RateStore
 
 def run_rate_store_tests(my_predbat):
     """
-    Run comprehensive tests for rate persistence and finalisation
+    Run comprehensive tests for rate persistence with freeze-past-slots logic
 
     Args:
         my_predbat: PredBat instance (unused for these tests but required for consistency)
@@ -34,20 +34,17 @@ def run_rate_store_tests(my_predbat):
     os.makedirs(test_dir)
 
     try:
-        print("*** Test 1: Basic rate persistence")
-        failed |= test_basic_persistence(os.path.join(test_dir, "test1"))
+        print("*** Test 1: Basic save and load")
+        failed |= test_basic_save_load(os.path.join(test_dir, "test1"))
 
-        print("*** Test 2: Rate finalisation")
-        failed |= test_finalisation(os.path.join(test_dir, "test2"))
+        print("*** Test 2: Frozen past slots")
+        failed |= test_frozen_past_slots(os.path.join(test_dir, "test2"))
 
-        print("*** Test 3: Override priority (manual > automatic > initial)")
-        failed |= test_override_priority(os.path.join(test_dir, "test3"))
+        print("*** Test 3: Future slots update")
+        failed |= test_future_slots_update(os.path.join(test_dir, "test3"))
 
-        print("*** Test 4: Finalised rates resist fresh API data")
-        failed |= test_finalised_resistance(os.path.join(test_dir, "test4"))
-
-        print("*** Test 5: Cleanup old files")
-        failed |= test_cleanup(os.path.join(test_dir, "test5"))
+        print("*** Test 4: Cleanup old files")
+        failed |= test_cleanup(os.path.join(test_dir, "test4"))
 
     finally:
         # Cleanup
@@ -57,18 +54,12 @@ def run_rate_store_tests(my_predbat):
     return failed
 
 
-def test_basic_persistence(test_dir):
-    """Test basic write and read of rates"""
+def test_basic_save_load(test_dir):
+    """Test basic save and load of rate tables"""
 
-    # Create test subdirectory
     os.makedirs(test_dir, exist_ok=True)
 
-    # Create mock base object
     class MockBase:
-        def __init__(self):
-            self.plan_interval_minutes = 30
-            self.minutes_now = 720  # 12:00
-
         def log(self, msg):
             print(f"  {msg}")
 
@@ -80,119 +71,47 @@ def test_basic_persistence(test_dir):
     base = MockBase()
     store = RateStore(base, save_dir=test_dir)
 
-    # Write some base rates
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    for hour in range(24):
-        minute = hour * 60
-        import_rate = 10.0 + hour  # Rates from 10.0 to 33.0
-        export_rate = 5.0 + hour   # Rates from 5.0 to 28.0
-        store.write_base_rate(today, minute, import_rate, export_rate)
+    # Create rate tables
+    rate_import = {0: 10.0, 30: 15.0, 60: 20.0, 90: 25.0}
+    rate_export = {0: 5.0, 30: 7.5, 60: 10.0, 90: 12.5}
 
-    # Verify rates written
-    for hour in range(24):
-        minute = hour * 60
-        expected_import = 10.0 + hour
-        expected_export = 5.0 + hour
+    # Save rates with freeze at minute 60  
+    success = store.save_rates(today, rate_import, rate_export, freeze_before_minute=60)
+    
+    if not success:
+        print("  ERROR: Failed to save rates")
+        return True
 
-        actual_import = store.get_rate(today, minute, is_import=True)
-        actual_export = store.get_rate(today, minute, is_import=False)
+    # Load rates back
+    loaded_import, loaded_export = store.load_rates(today)
 
-        if actual_import is None or abs(actual_import - expected_import) > 0.01:
-            print(f"  ERROR: Expected import rate {expected_import} at minute {minute}, got {actual_import}")
+    if loaded_import is None or loaded_export is None:
+        print("  ERROR: Failed to load rates")
+        return True
+
+    # Verify all rates loaded correctly
+    for minute in rate_import:
+        if minute not in loaded_import or abs(loaded_import[minute] - rate_import[minute]) > 0.01:
+            print(f"  ERROR: Import rate mismatch at minute {minute}: expected {rate_import[minute]}, got {loaded_import.get(minute)}")
             return True
 
-        if actual_export is None or abs(actual_export - expected_export) > 0.01:
-            print(f"  ERROR: Expected export rate {expected_export} at minute {minute}, got {actual_export}")
+    for minute in rate_export:
+        if minute not in loaded_export or abs(loaded_export[minute] - rate_export[minute]) > 0.01:
+            print(f"  ERROR: Export rate mismatch at minute {minute}: expected {rate_export[minute]}, got {loaded_export.get(minute)}")
             return True
 
-    print("  PASS: Basic persistence working")
+    print("  PASS: Basic save and load working")
     return False
 
 
-def test_finalisation(test_dir):
-    """Test that rates become finalised after their slot time + buffer"""
+def test_frozen_past_slots(test_dir):
+    """Test that past slots (< freeze_before_minute) are frozen"""
 
-    # Create test subdirectory
     os.makedirs(test_dir, exist_ok=True)
 
     class MockBase:
-        def __init__(self):
-            self.plan_interval_minutes = 30
-            self.minutes_now = 720  # 12:00
-
-        def log(self, msg):
-            print(f"  {msg}")
-
-        def get_arg(self, key, default):
-            if key == "rate_retention_days":
-                return 7
-            return default
-
-    base = MockBase()
-    store = RateStore(base, save_dir=test_dir)
-
-    # Write base rates for past slots (more than 5 minutes ago)
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # Write rates for slots that should be finalised (00:00, 00:30, 01:00)
-    store.write_base_rate(today, 0, 15.0, 5.0)
-    store.write_base_rate(today, 30, 20.0, 10.0)
-    store.write_base_rate(today, 60, 25.0, 15.0)
-
-    # Finalise past slots (set current minute to 70 which is past 01:00+5min buffer)
-    store.finalise_slots(today, 70)
-
-    # Check that slots are finalized in the JSON file
-    date_str = today.strftime("%Y_%m_%d")
-    file_path = os.path.join(test_dir, f"rates_{date_str}.json")
-
-    if not os.path.exists(file_path):
-        print(f"  ERROR: Rate file not found at {file_path}")
-        return True
-
-    with open(file_path, "r") as f:
-        data = json.load(f)
-
-    # Check finalised flags
-    if "rates_import" not in data or "rates_export" not in data:
-        print("  ERROR: Missing rate sections in file")
-        return True
-
-    # Slot at 0 should be finalised
-    if "00:00" not in data["rates_import"] or not data["rates_import"]["00:00"]["finalised"]:
-        print("  ERROR: Slot 00:00 import should be finalised")
-        return True
-
-    if "00:00" not in data["rates_export"] or not data["rates_export"]["00:00"]["finalised"]:
-        print("  ERROR: Slot 00:00 export should be finalised")
-        return True
-
-    # Slot at 30 should be finalised
-    if "00:30" not in data["rates_import"] or not data["rates_import"]["00:30"]["finalised"]:
-        print("  ERROR: Slot 00:30 import should be finalised")
-        return True
-
-    # Slot at 60 should be finalised
-    if "01:00" not in data["rates_import"] or not data["rates_import"]["01:00"]["finalised"]:
-        print("  ERROR: Slot 01:00 import should be finalised")
-        return True
-
-    print("  PASS: Finalisation working correctly")
-    return False
-
-
-def test_override_priority(test_dir):
-    """Test that manual overrides take priority over automatic, which take priority over initial"""
-
-    # Create test subdirectory
-    os.makedirs(test_dir, exist_ok=True)
-
-    class MockBase:
-        def __init__(self):
-            self.plan_interval_minutes = 30
-            self.minutes_now = 720  # 12:00
-
         def log(self, msg):
             print(f"  {msg}")
 
@@ -205,60 +124,50 @@ def test_override_priority(test_dir):
     store = RateStore(base, save_dir=test_dir)
 
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    minute = 120  # 02:00
 
-    # Write initial rate
-    store.write_base_rate(today, minute, 10.0, 5.0)
+    # Initial save with rates for minute 0-90
+    rate_import_v1 = {0: 10.0, 30: 15.0, 60: 20.0, 90: 25.0}
+    rate_export_v1 = {0: 5.0, 30: 7.5, 60: 10.0, 90: 12.5}
 
-    # Check initial rate
-    rate = store.get_rate(today, minute, is_import=True)
-    if rate is None or abs(rate - 10.0) > 0.01:
-        print(f"  ERROR: Expected initial import rate 10.0, got {rate}")
+    store.save_rates(today, rate_import_v1, rate_export_v1, freeze_before_minute=60)
+
+    # Second save with different rates - past slots (< 60) should be frozen
+    rate_import_v2 = {0: 99.0, 30: 99.0, 60: 30.0, 90: 35.0}  # Changed all
+    rate_export_v2 = {0: 99.0, 30: 99.0, 60: 15.0, 90: 17.5}
+
+    store.save_rates(today, rate_import_v2, rate_export_v2, freeze_before_minute=60)
+
+    # Load and verify
+    loaded_import, loaded_export = store.load_rates(today)
+
+    # Minutes 0 and 30 should still have original values (frozen)
+    if abs(loaded_import[0] - 10.0) > 0.01:
+        print(f"  ERROR: Frozen import rate at minute 0 changed from 10.0 to {loaded_import[0]}")
         return True
 
-    # Apply automatic override (IOG)
-    store.update_auto_override(today, minute, 5.0, 2.0, source="IOG")
-
-    rate = store.get_rate(today, minute, is_import=True)
-    if rate is None or abs(rate - 5.0) > 0.01:
-        print(f"  ERROR: Expected automatic import rate 5.0, got {rate}")
+    if abs(loaded_import[30] - 15.0) > 0.01:
+        print(f"  ERROR: Frozen import rate at minute 30 changed from 15.0 to {loaded_import[30]}")
         return True
 
-    # Check automatic rate directly
-    auto_rate = store.get_automatic_rate(today, minute, is_import=True)
-    if auto_rate is None or abs(auto_rate - 5.0) > 0.01:
-        print(f"  ERROR: Expected get_automatic_rate 5.0, got {auto_rate}")
+    # Minutes 60 and 90 should have new values (not frozen)
+    if abs(loaded_import[60] - 30.0) > 0.01:
+        print(f"  ERROR: Future import rate at minute 60 not updated to 30.0, got {loaded_import[60]}")
         return True
 
-    # Apply manual override
-    store.update_manual_override(today, minute, 3.0, 1.0)
-
-    rate = store.get_rate(today, minute, is_import=True)
-    if rate is None or abs(rate - 3.0) > 0.01:
-        print(f"  ERROR: Expected manual import rate 3.0, got {rate}")
+    if abs(loaded_import[90] - 35.0) > 0.01:
+        print(f"  ERROR: Future import rate at minute 90 not updated to 35.0, got {loaded_import[90]}")
         return True
 
-    # Check automatic rate is still preserved
-    auto_rate = store.get_automatic_rate(today, minute, is_import=True)
-    if auto_rate is None or abs(auto_rate - 5.0) > 0.01:
-        print(f"  ERROR: Automatic rate should still be 5.0, got {auto_rate}")
-        return True
-
-    print("  PASS: Override priority working correctly")
+    print("  PASS: Past slots correctly frozen")
     return False
 
 
-def test_finalised_resistance(test_dir):
-    """Test that finalised rates resist new API data"""
+def test_future_slots_update(test_dir):
+    """Test that future slots (>= freeze_before_minute) always get new values"""
 
-    # Create test subdirectory
     os.makedirs(test_dir, exist_ok=True)
 
     class MockBase:
-        def __init__(self):
-            self.plan_interval_minutes = 30
-            self.minutes_now = 720  # 12:00
-
         def log(self, msg):
             print(f"  {msg}")
 
@@ -271,44 +180,43 @@ def test_finalised_resistance(test_dir):
     store = RateStore(base, save_dir=test_dir)
 
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    minute = 0  # 00:00
 
-    # Write initial rate
-    store.write_base_rate(today, minute, 15.0, 5.0)
+    # Save initial future rates
+    rate_import_v1 = {120: 20.0, 150: 25.0}
+    rate_export_v1 = {120: 10.0, 150: 12.5}
 
-    # Finalise it (minute 10 is past minute 0 + 5 minute buffer)
-    store.finalise_slots(today, 10)
+    store.save_rates(today, rate_import_v1, rate_export_v1, freeze_before_minute=90)
 
-    # Try to overwrite with new API data
-    store.write_base_rate(today, minute, 25.0, 10.0)
+    # Update future rates multiple times
+    for version in range(2, 5):
+        rate_import_vN = {120: 20.0 + version * 10, 150: 25.0 + version * 10}
+        rate_export_vN = {120: 10.0 + version * 5, 150: 12.5 + version * 5}
+        store.save_rates(today, rate_import_vN, rate_export_vN, freeze_before_minute=90)
 
-    # Should still be 15.0 (finalised rate resists changes)
-    rate = store.get_rate(today, minute, is_import=True)
-    if rate is None or abs(rate - 15.0) > 0.01:
-        print(f"  ERROR: Finalised import rate changed from 15.0 to {rate}")
+    # Load and verify we have the latest values
+    loaded_import, loaded_export = store.load_rates(today)
+
+    expected_import_120 = 20.0 + 4 * 10  # 60.0
+    expected_import_150 = 25.0 + 4 * 10  # 65.0
+
+    if abs(loaded_import[120] - expected_import_120) > 0.01:
+        print(f"  ERROR: Future rate at 120 not updated to {expected_import_120}, got {loaded_import[120]}")
         return True
 
-    # Export should also resist
-    export_rate = store.get_rate(today, minute, is_import=False)
-    if export_rate is None or abs(export_rate - 5.0) > 0.01:
-        print(f"  ERROR: Finalised export rate changed from 5.0 to {export_rate}")
+    if abs(loaded_import[150] - expected_import_150) > 0.01:
+        print(f"  ERROR: Future rate at 150 not updated to {expected_import_150}, got {loaded_import[150]}")
         return True
 
-    print("  PASS: Finalised rates resist new API data")
+    print("  PASS: Future slots always updated")
     return False
 
 
 def test_cleanup(test_dir):
     """Test cleanup of old rate files"""
 
-    # Create test subdirectory
     os.makedirs(test_dir, exist_ok=True)
 
     class MockBase:
-        def __init__(self):
-            self.plan_interval_minutes = 30
-            self.minutes_now = 720  # 12:00
-
         def log(self, msg):
             print(f"  {msg}")
 
@@ -320,7 +228,7 @@ def test_cleanup(test_dir):
     base = MockBase()
     store = RateStore(base, save_dir=test_dir)
 
-    # Create some old rate files manually
+    # Create rate files for last 10 days
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     for days_ago in range(10):
@@ -331,26 +239,31 @@ def test_cleanup(test_dir):
         # Write dummy data
         with open(file_path, "w") as f:
             json.dump({
-                "rates_import": {},
-                "rates_export": {},
+                "rates_import": {"0": 10.0},
+                "rates_export": {"0": 5.0},
                 "last_updated": old_date.isoformat()
             }, f)
 
-        # Set file modification time to match the date (so cleanup works correctly)
-        old_timestamp = (old_date - timedelta(hours=12)).timestamp()  # Set to noon of that day
+        # Set file modification time to match the date
+        old_timestamp = (old_date - timedelta(hours=12)).timestamp()
         os.utime(file_path, (old_timestamp, old_timestamp))
 
     # Run cleanup with 7 days retention
     retention_days = 7
-    store.cleanup_old_files(retention_days)
+    removed = store.cleanup_old_files(retention_days)
 
-    # Check files - should have at most retention_days + 1 (today) files
+    # Check remaining files
     remaining_files = [f for f in os.listdir(test_dir) if f.startswith("rates_") and f.endswith(".json") and not f.endswith(".bak")]
 
-    # Should have at most 7 days of retention + today = 8 files
+    # Should have at most 7 days + today = 8 files
     if len(remaining_files) > 8:
         print(f"  ERROR: Expected <= 8 files after cleanup, found {len(remaining_files)}")
         print(f"  Files: {sorted(remaining_files)}")
+        return True
+
+    # At least 2 files should be removed (days 8-9), possibly more depending on time of day
+    if removed < 2:
+        print(f"  ERROR: Expected to remove at least 2 files, removed {removed}")
         return True
 
     print("  PASS: Cleanup working correctly")
